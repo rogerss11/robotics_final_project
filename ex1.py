@@ -24,7 +24,7 @@ dh_params = [
     (0, sp.pi / 2, 50, q1),
     (93, 0, 0, q2),
     (93, 0, 0, q3),
-    # (50, sp.pi / 2, 0, q4)
+    (50, sp.pi / 2, 0, q4)
 ]
 
 # --- Compute T04 symbolically ---
@@ -132,7 +132,9 @@ def update(val):
     origins, x_axes, y_axes, z_axes = compute_positions(q_vals)
     for i, line in enumerate(link_lines):
         p1, p2 = origins[i], origins[i + 1]
-        line.set_data([p1[0], p2[0]])
+        # set_data expects x and y sequences for 2D; for 3D Line objects pass x and y,
+        # then set z with set_3d_properties.
+        line.set_data([p1[0], p2[0]], [p1[1], p2[1]])
         line.set_3d_properties([p1[2], p2[2]])
     for (qx, qy, qz) in frame_quivers:
         qx.remove(); qy.remove(); qz.remove()
