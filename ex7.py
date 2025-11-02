@@ -1,9 +1,11 @@
 import numpy as np
 import sympy as sp
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import time
 
 # ------------------------------------------------------------
-# DH, FK, Jacobian, IK (same definitions as ex5)
+# DH, FK, Jacobian, IK definitions (same base as ex5)
 # ------------------------------------------------------------
 def DH(a, alpha, d, theta):
     return sp.Matrix([
@@ -18,7 +20,7 @@ dh_params = [
     (0, sp.pi/2, 50, q1),
     (93, 0, 0, q2),
     (93, 0, 0, q3),
-    (50, sp.pi/2, 0, q4)
+    (50, sp.pi/2, 0, q4)   # stylus link: 50 mm along x4
 ]
 
 def forward_transforms():
@@ -32,6 +34,7 @@ def forward_transforms():
 Ts = forward_transforms()
 
 def geometric_jacobian(Ts, end_index):
+    # end_index = 4 for frame-4 origin (before the tip offset is implicitly included by DH)
     o_n = Ts[end_index][0:3, 3]
     Jv_cols, Jw_cols = [], []
     for i in range(1, 5):
@@ -44,8 +47,10 @@ def geometric_jacobian(Ts, end_index):
 
 J4_sym = geometric_jacobian(Ts, 4)
 
+# Analytic IK (for frame-4 base position)
 a1, a2, a3, d1 = 0, 93, 93, 50
 def ik_solver(x, y, z, c):
+    # x,y,z are for frame-4 base position (not the tip). c = sin(tilt) ≈ 0 for horizontal stylus
     q1v = np.arctan2(y, x)
     r = np.sqrt(x**2 + y**2) - a1
     s = z - d1
@@ -62,16 +67,16 @@ def J4_numeric(qv):
     return np.array(J4_sym.evalf(subs=subs), dtype=float)
 
 # ------------------------------------------------------------
-# EE circle and knot points (same as ex3)
+# EE circular path definition (stylus tip path)
 # ------------------------------------------------------------
 R = 32.0
 p_c = np.array([150.0, 0.0, 120.0])
 phis = np.linspace(0, 2*np.pi, 37)
 points = []
 for phi in phis:
-    p = p_c + R * np.array([0.0, np.cos(phi), np.sin(phi)])
+    p = p_c + R * np.array([0.0, np.cos(phi), np.sin(phi)])  # tip trajectory in world
     x, y, z = p
-    c = 0.0
+    c = 0.0  # horizontal stylus
     points.append([x, y, z, c])
 points = np.array(points)
 
@@ -79,12 +84,21 @@ idxs = [0, 9, 18, 27, 36]
 times = np.array([0, 2, 4, 6, 8])
 
 # ------------------------------------------------------------
-# Joint positions at knots
+# Joint positions at knots (account for stylus offset)
+# Convert desired TIP position -> frame-4 base by subtracting 50 mm along x
 # ------------------------------------------------------------
-Q = np.array([ik_solver(*points[i]) for i in idxs])
+stylus_offset = 50.0  # mm along x4 (≈ world x here since c=0)
+Q = []
+for i in idxs:
+    x_t, y_t, z_t, c_t = points[i]
+    x_base = x_t - stylus_offset
+    qv = ik_solver(x_base, y_t, z_t, c_t)
+    Q.append(qv)
+Q = np.array(Q)
 
 # ------------------------------------------------------------
-# EE velocities and corresponding joint velocities
+# EE linear velocities at knots (tip path) and joint velocities via Jacobian
+# (We approximate using the same linear velocities for the frame-4 origin.)
 # ------------------------------------------------------------
 V_knots = [
     np.array([0.0,   0.0,  0.0]),
@@ -101,19 +115,19 @@ for k in range(len(times)):
     qdot = np.linalg.pinv(J) @ xdot
     Qdot[k] = qdot.flatten()
 
-Qddot = np.zeros_like(Q)  # zero acceleration at all knots
+Qddot = np.zeros_like(Q)  # zero accelerations at knots
 
 # ------------------------------------------------------------
-# Solve quintic coefficients per segment and joint
+# Quintic interpolation coefficients per segment and joint
 # ------------------------------------------------------------
-T = 2.0
+Tseg = 2.0
 A = np.array([
     [0, 0, 0, 0, 0, 1],
-    [T**5, T**4, T**3, T**2, T, 1],
+    [Tseg**5, Tseg**4, Tseg**3, Tseg**2, Tseg, 1],
     [0, 0, 0, 0, 1, 0],
-    [5*T**4, 4*T**3, 3*T**2, 2*T, 1, 0],
+    [5*Tseg**4, 4*Tseg**3, 3*Tseg**2, 2*Tseg, 1, 0],
     [0, 0, 0, 2, 0, 0],
-    [20*T**3, 12*T**2, 6*T, 2, 0, 0]
+    [20*Tseg**3, 12*Tseg**2, 6*Tseg, 2, 0, 0]
 ], dtype=float)
 
 def solve_quintic(q0, q1, qd0, qd1):
@@ -126,7 +140,7 @@ for s in range(len(times) - 1):
     coeffs.append(seg)
 
 # ------------------------------------------------------------
-# Evaluate q, qdot, qddot over time
+# Evaluate q(t), qdot(t), qddot(t) over 0..8 s
 # ------------------------------------------------------------
 def eval_quintic(a, t):
     a5, a4, a3, a2, a1, a0 = a
@@ -136,7 +150,9 @@ def eval_quintic(a, t):
     return q, qd, qdd
 
 t_fine = np.linspace(0, 8, 400)
-q_vals, qd_vals, qdd_vals = np.zeros((len(t_fine), 4)), np.zeros((len(t_fine), 4)), np.zeros((len(t_fine), 4))
+q_vals = np.zeros((len(t_fine), 4))
+qd_vals = np.zeros((len(t_fine), 4))
+qdd_vals = np.zeros((len(t_fine), 4))
 
 for k, t in enumerate(t_fine):
     seg_idx = min(int(t // 2), 3)
@@ -146,12 +162,11 @@ for k, t in enumerate(t_fine):
         q_vals[k, j], qd_vals[k, j], qdd_vals[k, j] = q, qd, qdd
 
 # ------------------------------------------------------------
-# Plot results: q, qdot, qddot
+# Plot q, qdot, qddot
 # ------------------------------------------------------------
 plt.figure(figsize=(10, 10))
 joint_labels = [r"$q_1$", r"$q_2$", r"$q_3$", r"$q_4$"]
 
-# q(t)
 plt.subplot(3,1,1)
 for j in range(4):
     plt.plot(t_fine, q_vals[:, j], label=joint_labels[j])
@@ -161,7 +176,6 @@ plt.title("Joint positions $q_i(t)$")
 plt.ylabel("Angle [rad]")
 plt.grid(True); plt.legend()
 
-# qdot(t)
 plt.subplot(3,1,2)
 for j in range(4):
     plt.plot(t_fine, qd_vals[:, j], label=joint_labels[j])
@@ -171,7 +185,6 @@ plt.title(r"Joint velocities $\dot{q}_i(t)$")
 plt.ylabel("Velocity [rad/s]")
 plt.grid(True); plt.legend()
 
-# qddot(t)
 plt.subplot(3,1,3)
 for j in range(4):
     plt.plot(t_fine, qdd_vals[:, j], label=joint_labels[j])
@@ -185,70 +198,58 @@ plt.tight_layout()
 plt.show()
 
 # ------------------------------------------------------------
-#  Compare actual EE path vs. desired circular path
+# FK helper (returns frame origins)
 # ------------------------------------------------------------
-from mpl_toolkits.mplot3d import Axes3D  # for 3D plotting
-
-# --- Reuse FK computation like in ex3 ---
-def compute_positions(q_vals):
-    """Compute all frame origins given joint angles (same as ex3)."""
-    subs = {q1: q_vals[0], q2: q_vals[1], q3: q_vals[2], q4: q_vals[3]}
+def compute_positions(q_vec):
+    subs = {q1: q_vec[0], q2: q_vec[1], q3: q_vec[2], q4: q_vec[3]}
     Tcurr = sp.eye(4)
-    origins = [np.array([0, 0, 0])]
+    origins = [np.array([0.0, 0.0, 0.0])]
     for p in dh_params:
         Tcurr = Tcurr * DH(*p)
         Tn = np.array(Tcurr.evalf(subs=subs), dtype=float)
         origins.append(Tn[0:3, 3])
     return origins
 
-# --- Compute desired EE path (perfect circle) ---
+# ------------------------------------------------------------
+# Compare actual EE vs desired circle (both FK-based)
+# ------------------------------------------------------------
+# Desired (FK-based): convert tip point to frame-4 base for IK, then FK to get tip from DH chain
 desired_positions = []
-for phi in phis:
-    p = p_c + R * np.array([0.0, np.cos(phi), np.sin(phi)])
-    desired_positions.append(p)
+for p in points:
+    x_t, y_t, z_t, c_t = p
+    q_tmp = ik_solver(x_t - stylus_offset, y_t, z_t, c_t)
+    origins_tmp = compute_positions(q_tmp)
+    desired_positions.append(origins_tmp[-1])  # tip (thanks to DH last link)
 desired_positions = np.array(desired_positions)
 
-# --- Compute actual EE path from interpolated q(t) ---
+# Actual path from interpolated q(t)
 actual_positions = []
 for q in q_vals:
     origins = compute_positions(q)
-    ee = origins[-1]
-    actual_positions.append(ee)
+    actual_positions.append(origins[-1])
 actual_positions = np.array(actual_positions)
 
-# --- Plot both paths ---
 fig = plt.figure(figsize=(8, 6))
 ax = fig.add_subplot(111, projection='3d')
-
-# Plot desired circular path (orange)
 ax.plot(desired_positions[:,0], desired_positions[:,1], desired_positions[:,2],
-        'orange', label='Desired EE path (circular)', linewidth=2)
-
-# Plot actual EE path (blue)
+        'orange', label='Desired EE path (FK-based)', linewidth=2)
 ax.plot(actual_positions[:,0], actual_positions[:,1], actual_positions[:,2],
-        'b--', label='Interpolated EE path (Problem 6)', linewidth=2)
-
-# Highlight start and end points
+        'b--', label='Interpolated EE path (quintic)', linewidth=2)
 ax.scatter(desired_positions[0,0], desired_positions[0,1], desired_positions[0,2],
-           c='green', s=50, label='Start (t=0)')
+           c='green', s=50, label='Start')
 ax.scatter(desired_positions[-1,0], desired_positions[-1,1], desired_positions[-1,2],
-           c='red', s=50, label='End (t=8 s)')
-
-# Axis labels and view
-ax.set_xlabel("X [mm]")
-ax.set_ylabel("Y [mm]")
-ax.set_zlabel("Z [mm]")
+           c='red', s=50, label='End')
+ax.set_xlabel("X [mm]"); ax.set_ylabel("Y [mm]"); ax.set_zlabel("Z [mm]")
 ax.set_title("Comparison of End-Effector Path\nDesired (Circle) vs. Interpolated (Quintic)")
-ax.legend()
-ax.view_init(elev=25, azim=45)
+ax.legend(); ax.view_init(elev=25, azim=45); ax.set_box_aspect([1,1,1])
+# Consistent axes/view
+ax.set_xlim([0, 250]); ax.set_ylim([-150, 150]); ax.set_zlim([0, 250])
 ax.set_box_aspect([1, 1, 1])
-plt.tight_layout()
-plt.show()
-
-import time
+ax.view_init(elev=25, azim=45)
+plt.tight_layout(); plt.show()
 
 # ------------------------------------------------------------
-#  Visualization setup (copied from ex3 and adapted)
+# Robot animation following interpolated q(t)
 # ------------------------------------------------------------
 fig = plt.figure(figsize=(8, 6))
 ax = fig.add_subplot(111, projection="3d")
@@ -263,29 +264,30 @@ ax.text(35, 0, 0, "X₀", color="r")
 ax.text(0, 35, 0, "Y₀", color="g")
 ax.text(0, 0, 35, "Z₀", color="b")
 
-# Display all 37 target EE positions (orange dots)
+# Show target circle (FK-based)
 tip_positions = []
 for p in points:
     x_t, y_t, z_t, c_t = p
-    q_tmp = ik_solver(x_t, y_t, z_t, c_t)
+    q_tmp = ik_solver(x_t - stylus_offset, y_t, z_t, c_t)
     origins_tmp = compute_positions(q_tmp)
     tip_positions.append(origins_tmp[-1])
 tip_positions = np.array(tip_positions)
-ax.scatter(tip_positions[:,0], tip_positions[:,1], tip_positions[:,2], 
+ax.scatter(tip_positions[:,0], tip_positions[:,1], tip_positions[:,2],
            c="orange", s=20, label="Target circle (desired)")
 
-# Initial pose for animation
+# Initial pose
 q_init = q_vals[0]
 origins = compute_positions(q_init)
 
-# Draw links and frames
+# Draw links
 link_lines = []
 for i in range(len(origins) - 1):
     p1, p2 = origins[i], origins[i + 1]
-    (line,) = ax.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]], 
+    (line,) = ax.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]],
                       "k--", linewidth=1.2)
     link_lines.append(line)
 
+# Frame axes at each joint (unit directions shown with length=20)
 frame_quivers = []
 for i in range(1, len(origins)):
     o = origins[i]
@@ -294,40 +296,31 @@ for i in range(1, len(origins)):
     qz = ax.quiver(o[0], o[1], o[2], 0, 0, 1, color="b", length=20, normalize=True)
     frame_quivers.append((qx, qy, qz))
 
-# Display joint values
+# Joint values display
 joint_display = ax.text2D(0.98, 0.95, "", transform=ax.transAxes, fontsize=10,
                           verticalalignment='top', horizontalalignment='right',
                           bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
 
-# Axis and view
-ax.set_xlim([0, 250])
-ax.set_ylim([-150, 150])
-ax.set_zlim([0, 250])
-ax.set_xlabel("X (mm)")
-ax.set_ylabel("Y (mm)")
-ax.set_zlabel("Z (mm)")
+# Axis/view
+ax.set_xlim([0, 250]); ax.set_ylim([-150, 150]); ax.set_zlim([0, 250])
+ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)"); ax.set_zlabel("Z (mm)")
 ax.set_title("Ex6: Robot following interpolated (quintic) EE path")
-ax.legend()
-ax.view_init(elev=25, azim=45)
-ax.set_box_aspect([1, 1, 1])
+ax.legend(); ax.view_init(elev=25, azim=45); ax.set_box_aspect([1, 1, 1])
 
-# ------------------------------------------------------------
-#  Animate along the computed path
-# ------------------------------------------------------------
-actual_path = []  # for plotting EE trace
+# Animate
+actual_path = []
 n_frames = len(q_vals)
-
 for k in range(n_frames):
     q_now = q_vals[k]
     origins = compute_positions(q_now)
     actual_path.append(origins[-1])
-    
+
     # Update links
     for i, line in enumerate(link_lines):
         p1, p2 = origins[i], origins[i + 1]
         line.set_data([p1[0], p2[0]], [p1[1], p2[1]])
         line.set_3d_properties([p1[2], p2[2]])
-    
+
     # Update frames
     for (qx, qy, qz) in frame_quivers:
         qx.remove(); qy.remove(); qz.remove()
@@ -339,14 +332,14 @@ for k in range(n_frames):
         qz = ax.quiver(o[0], o[1], o[2], 0, 0, 1, color="b", length=20, normalize=True)
         frame_quivers.append((qx, qy, qz))
 
-    # Update text with current joint values
+    # Update joint text
     joint_text = (f"q1 = {q_now[0]:.3f} rad\n"
                   f"q2 = {q_now[1]:.3f} rad\n"
                   f"q3 = {q_now[2]:.3f} rad\n"
                   f"q4 = {q_now[3]:.3f} rad")
     joint_display.set_text(joint_text)
 
-    # Draw current EE trace
+    # Update EE trace
     actual_arr = np.array(actual_path)
     if k == 0:
         path_line, = ax.plot(actual_arr[:,0], actual_arr[:,1], actual_arr[:,2],
@@ -355,6 +348,37 @@ for k in range(n_frames):
         path_line.set_data(actual_arr[:,0], actual_arr[:,1])
         path_line.set_3d_properties(actual_arr[:,2])
 
-    plt.pause(0.03)  # ~30 ms per frame → smooth animation
+    plt.pause(0.03)  # ~30 ms per frame
 
 plt.show()
+
+# ------------------------------------------------------------
+# Final: Display both circles only (FK-based, no robot)
+# ------------------------------------------------------------
+fig = plt.figure(figsize=(7, 6))
+ax = fig.add_subplot(111, projection="3d")
+
+# Desired circular path (FK-based)
+ax.plot(desired_positions[:,0], desired_positions[:,1], desired_positions[:,2],
+        color="orange", linewidth=2, label="Desired EE circle (FK-based)")
+
+# Actual interpolated EE path
+actual_arr = np.array(actual_path)
+ax.plot(actual_arr[:,0], actual_arr[:,1], actual_arr[:,2],
+        "b--", linewidth=2, label="Interpolated EE circle")
+
+# Start/End markers
+ax.scatter(desired_positions[0,0], desired_positions[0,1], desired_positions[0,2],
+           c='green', s=50, label='Start (t=0)')
+ax.scatter(desired_positions[-1,0], desired_positions[-1,1], desired_positions[-1,2],
+           c='red', s=50, label='End (t=8 s)')
+
+# Consistent axes/view
+ax.set_xlim([0, 250]); ax.set_ylim([-150, 150]); ax.set_zlim([0, 250])
+ax.set_box_aspect([1, 1, 1])
+ax.view_init(elev=25, azim=45)
+
+ax.set_xlabel("X [mm]"); ax.set_ylabel("Y [mm]"); ax.set_zlabel("Z [mm]")
+ax.set_title("Desired vs. Interpolated EE Circles (No Robot)")
+ax.legend(); ax.grid(True)
+plt.tight_layout(); plt.show()
