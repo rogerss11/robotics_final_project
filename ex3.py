@@ -121,6 +121,15 @@ for i in range(1, len(origins)):
     qz = ax.quiver(o[0], o[1], o[2], *z_axes[i-1], color="b", length=20, normalize=True)
     frame_quivers.append((qx, qy, qz))
 
+# Joint values display (shown as text on the side). Do not alter simulation visuals.
+# Initialized with the initial joint values (radians).
+joint_text = (f"q1 = {q_init[0]:.3f} rad\n"
+              f"q2 = {q_init[1]:.3f} rad\n"
+              f"q3 = {q_init[2]:.3f} rad\n"
+              f"q4 = {q_init[3]:.3f} rad")
+joint_display = ax.text2D(0.98, 0.95, joint_text, transform=ax.transAxes, fontsize=10,
+                          verticalalignment='top', horizontalalignment='right', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
+
 # Axis setup
 ax.set_xlim([0, 250])
 ax.set_ylim([-150, 150])
@@ -158,6 +167,17 @@ def update(val):
         # set_data requires both x and y sequences for a 3D line; pass x and y, then z
         line.set_data([p1[0], p2[0]], [p1[1], p2[1]])
         line.set_3d_properties([p1[2], p2[2]])
+
+    # Update joint values text (do not change simulation visuals)
+    try:
+        joint_text = (f"q1 = {q_vals[0]:.3f} rad\n"
+                      f"q2 = {q_vals[1]:.3f} rad\n"
+                      f"q3 = {q_vals[2]:.3f} rad\n"
+                      f"q4 = {q_vals[3]:.3f} rad")
+        joint_display.set_text(joint_text)
+    except Exception:
+        # ignore if joint_display isn't available for some reason
+        pass
 
     # Update frames
     for (qx, qy, qz) in frame_quivers:
