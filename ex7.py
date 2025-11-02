@@ -162,42 +162,6 @@ for k, t in enumerate(t_fine):
         q_vals[k, j], qd_vals[k, j], qdd_vals[k, j] = q, qd, qdd
 
 # ------------------------------------------------------------
-# Plot q, qdot, qddot
-# ------------------------------------------------------------
-plt.figure(figsize=(10, 10))
-joint_labels = [r"$q_1$", r"$q_2$", r"$q_3$", r"$q_4$"]
-
-plt.subplot(3,1,1)
-for j in range(4):
-    plt.plot(t_fine, q_vals[:, j], label=joint_labels[j])
-for j in range(4):
-    plt.scatter(times, Q[:, j], color='k', s=10)
-plt.title("Joint positions $q_i(t)$")
-plt.ylabel("Angle [rad]")
-plt.grid(True); plt.legend()
-
-plt.subplot(3,1,2)
-for j in range(4):
-    plt.plot(t_fine, qd_vals[:, j], label=joint_labels[j])
-for j in range(4):
-    plt.scatter(times, Qdot[:, j], color='k', s=10)
-plt.title(r"Joint velocities $\dot{q}_i(t)$")
-plt.ylabel("Velocity [rad/s]")
-plt.grid(True); plt.legend()
-
-plt.subplot(3,1,3)
-for j in range(4):
-    plt.plot(t_fine, qdd_vals[:, j], label=joint_labels[j])
-plt.title(r"Joint accelerations $\ddot{q}_i(t)$")
-plt.xlabel("Time [s]")
-plt.ylabel("Acceleration [rad/s²]")
-plt.grid(True); plt.legend()
-
-plt.suptitle("Quintic interpolation for joint motion (with velocity & acceleration continuity)")
-plt.tight_layout()
-plt.show()
-
-# ------------------------------------------------------------
 # FK helper (returns frame origins)
 # ------------------------------------------------------------
 def compute_positions(q_vec):

@@ -1,11 +1,12 @@
-# ex6.py — Quintic joint trajectory (Problem 6)
 import numpy as np
 import sympy as sp
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import time
 
-# ---------------------------
-# Kinematics (from ex4/ex5)
-# ---------------------------
+# ------------------------------------------------------------
+# DH, FK, Jacobian, IK definitions (same base as ex5)
+# ------------------------------------------------------------
 def DH(a, alpha, d, theta):
     return sp.Matrix([
         [sp.cos(theta), -sp.sin(theta)*sp.cos(alpha),  sp.sin(theta)*sp.sin(alpha), a*sp.cos(theta)],
@@ -16,10 +17,10 @@ def DH(a, alpha, d, theta):
 
 q1, q2, q3, q4 = sp.symbols("q1 q2 q3 q4")
 dh_params = [
-    (0,  sp.pi/2, 50, q1),
-    (93, 0,       0,  q2),
-    (93, 0,       0,  q3),
-    (50, sp.pi/2, 0,  q4)
+    (0, sp.pi/2, 50, q1),
+    (93, 0, 0, q2),
+    (93, 0, 0, q3),
+    (50, sp.pi/2, 0, q4)   # stylus link: 50 mm along x4
 ]
 
 def forward_transforms():
@@ -28,194 +29,187 @@ def forward_transforms():
     for p in dh_params:
         T = T * DH(*p)
         Ts.append(sp.simplify(T))
-    return Ts  # T0..T4
+    return Ts
 
-Ts_sym = forward_transforms()
+Ts = forward_transforms()
 
-def geometric_jacobian(Ts, end_index=4):
-    """6x4 geometric Jacobian at frame {end_index}."""
+def geometric_jacobian(Ts, end_index):
+    # end_index = 4 for frame-4 origin (before the tip offset is implicitly included by DH)
     o_n = Ts[end_index][0:3, 3]
     Jv_cols, Jw_cols = [], []
-    for i in range(1, 5):                           # 4 revolute joints
+    for i in range(1, 5):
         z_im1 = Ts[i-1][0:3, 2]
         o_im1 = Ts[i-1][0:3, 3]
         Jv_cols.append(sp.Matrix.cross(z_im1, o_n - o_im1))
         Jw_cols.append(z_im1)
-    Jv = sp.Matrix.hstack(*Jv_cols)
-    Jw = sp.Matrix.hstack(*Jw_cols)
-    return sp.simplify(sp.Matrix.vstack(Jv, Jw))
+    return sp.simplify(sp.Matrix.vstack(sp.Matrix.hstack(*Jv_cols),
+                                        sp.Matrix.hstack(*Jw_cols)))
 
-J4_sym = geometric_jacobian(Ts_sym, 4)
+J4_sym = geometric_jacobian(Ts, 4)
 
-# IK (from ex2/ex3)
+# Analytic IK (for frame-4 base position)
 a1, a2, a3, d1 = 0, 93, 93, 50
 def ik_solver(x, y, z, c):
-    """Analytic IK. c = x4_z = sin(q2+q3+q4)."""
+    # x,y,z are for frame-4 base position (not the tip). c = sin(tilt) ≈ 0 for horizontal stylus
     q1v = np.arctan2(y, x)
     r = np.sqrt(x**2 + y**2) - a1
     s = z - d1
-    c3 = (r**2 + s**2 - a2**2 - a3**2) / (2*a2*a3)
+    c3 = (r**2 + s**2 - a2**2 - a3**2) / (2 * a2 * a3)
     c3 = np.clip(c3, -1.0, 1.0)
-    q3v = np.arctan2(np.sqrt(1 - c3**2), c3)  # elbow-down
+    q3v = np.arctan2(np.sqrt(1 - c3**2), c3)
     q2v = np.arctan2(s, r) - np.arctan2(a3*np.sin(q3v), a2 + a3*np.cos(q3v))
     c = np.clip(c, -1.0, 1.0)
     q4v = np.arcsin(c) - (q2v + q3v)
     return np.array([q1v, q2v, q3v, q4v])
 
-# ---------------------------
-# Knot points (same circle as ex3)
-# ---------------------------
+def J4_numeric(qv):
+    subs = {q1: qv[0], q2: qv[1], q3: qv[2], q4: qv[3]}
+    return np.array(J4_sym.evalf(subs=subs), dtype=float)
+
+# ------------------------------------------------------------
+# EE circular path definition (stylus tip path)
+# ------------------------------------------------------------
 R = 32.0
 p_c = np.array([150.0, 0.0, 120.0])
-phis = np.linspace(0, 2*np.pi, 37)  # 0..36
-idxs = [0, 9, 18, 27, 36]           # φ0, φ9, φ18, φ27, φ36
+phis = np.linspace(0, 2*np.pi, 37)
+points = []
+for phi in phis:
+    p = p_c + R * np.array([0.0, np.cos(phi), np.sin(phi)])  # tip trajectory in world
+    x, y, z = p
+    c = 0.0  # horizontal stylus
+    points.append([x, y, z, c])
+points = np.array(points)
 
-def circle_point(phi):
-    # circle in YZ plane, centered at p_c, radius R
-    return p_c + R*np.array([0.0, np.cos(phi), np.sin(phi)])
+idxs = [0, 9, 18, 27, 36]
+times = np.array([0, 2, 4, 6, 8])
 
-# End-effector linear velocities at knots (mm/s), ω = 0
-# From the statement image:
-# v(tA=0)=[0,0,0], v(tA=2)=v(tB=0)=[0,-27,0],
-# v(tB=2)=v(tC=0)=[0,0,-27], v(tC=2)=v(tD=0)=[0,27,0], v(tD=2)=[0,0,0]
-v_list = [
-    np.array([0.,   0.,   0.  ]),   # at φ0          (knot 0)
-    np.array([0., -27.,  0.  ]),    # at φ9          (knot 1)
-    np.array([0.,  0., -27. ]),     # at φ18         (knot 2)
-    np.array([0., 27.,  0.  ]),     # at φ27         (knot 3)
-    np.array([0.,  0.,  0.  ])      # at φ36 (=φ0)   (knot 4)
+# ------------------------------------------------------------
+# Joint positions at knots (account for stylus offset)
+# Convert desired TIP position -> frame-4 base by subtracting 50 mm along x
+# ------------------------------------------------------------
+stylus_offset = 50.0  # mm along x4 (≈ world x here since c=0)
+Q = []
+for i in idxs:
+    x_t, y_t, z_t, c_t = points[i]
+    x_base = x_t - stylus_offset
+    qv = ik_solver(x_base, y_t, z_t, c_t)
+    Q.append(qv)
+Q = np.array(Q)
+
+# ------------------------------------------------------------
+# EE linear velocities at knots (tip path) and joint velocities via Jacobian
+# (We approximate using the same linear velocities for the frame-4 origin.)
+# ------------------------------------------------------------
+V_knots = [
+    np.array([0.0,   0.0,  0.0]),
+    np.array([0.0, -27.0,  0.0]),
+    np.array([0.0,   0.0, -27.0]),
+    np.array([0.0,  27.0,  0.0]),
+    np.array([0.0,   0.0,  0.0])
 ]
-omega_list = [np.array([0., 0., 0.]) for _ in range(5)]  # stylus kept horizontal
+OMEGA = np.zeros(3)
+Qdot = np.zeros_like(Q)
+for k in range(len(times)):
+    J = J4_numeric(Q[k])
+    xdot = np.hstack([V_knots[k], OMEGA]).reshape(6, 1)
+    qdot = np.linalg.pinv(J) @ xdot
+    Qdot[k] = qdot.flatten()
 
-# Compute q, qdot, qddot (acc=0) at each knot
-q_knots   = []
-qdot_knots = []
-qddot_knots = []
+Qddot = np.zeros_like(Q)  # zero accelerations at knots
 
-for k, idx in enumerate(idxs):
-    phi = phis[idx]
-    x, y, z = circle_point(phi)
-    c = 0.0                                   # keep x4_z = 0  (horizontal stylus)
-    qv = ik_solver(x, y, z, c)                 # joint position
-    subs = {q1: qv[0], q2: qv[1], q3: qv[2], q4: qv[3]}
-    J4_num = np.array(J4_sym.evalf(subs=subs), dtype=float)
-
-    v = v_list[k].reshape(3, 1)
-    omega = omega_list[k].reshape(3, 1)
-    xdot = np.vstack((v, omega))               # 6x1
-
-    qdot = np.linalg.pinv(J4_num) @ xdot       # 4x1
-    q_knots.append(qv)
-    qdot_knots.append(qdot.flatten())
-    qddot_knots.append(np.zeros(4))            # per Hint 2
-
-q_knots = np.array(q_knots)         # shape (5,4)
-qdot_knots = np.array(qdot_knots)   # shape (5,4)
-qddot_knots = np.array(qddot_knots) # zeros
-
-# ---------------------------
-# Quintic trajectory per segment/joint
-# ---------------------------
-def quintic_coeffs(q0, q1, dq0, dq1, ddq0, ddq1, T=2.0):
-    """
-    Solve for coefficients a5..a0 of:
-      q(t) = a5 t^5 + a4 t^4 + a3 t^3 + a2 t^2 + a1 t + a0,   t in [0, T]
-    with boundary conditions on q, dq, ddq at t=0 and t=T.
-    Returns coefficients [a5, a4, a3, a2, a1, a0].
-    """
-    T2, T3, T4, T5 = T**2, T**3, T**4, T**5
-    M = np.array([
-        [    0,     0,     0,     0,    0, 1],
-        [    0,     0,     0,     0,  1.0, 0],
-        [    0,     0,     0,   2.0,    0, 0],
-        [  T5,   T4,   T3,   T2,    T, 1],
-        [5*T4, 4*T3, 3*T2, 2*T,  1.0, 0],
-        [20*T3,12*T2, 6*T,  2.0,   0, 0]
-    ], dtype=float)
-    b = np.array([q0, dq0, ddq0, q1, dq1, ddq1], dtype=float)
-    a = np.linalg.solve(M, b)
-    return a  # [a5..a0]
-
-# Four segments: A: 0→1, B: 1→2, C: 2→3, D: 3→4  (each T=2 s)
-segments = [('A', 0, 1), ('B', 1, 2), ('C', 2, 3), ('D', 3, 4)]
+# ------------------------------------------------------------
+# Quintic interpolation coefficients per segment and joint
+# ------------------------------------------------------------
 Tseg = 2.0
+A = np.array([
+    [0, 0, 0, 0, 0, 1],
+    [Tseg**5, Tseg**4, Tseg**3, Tseg**2, Tseg, 1],
+    [0, 0, 0, 0, 1, 0],
+    [5*Tseg**4, 4*Tseg**3, 3*Tseg**2, 2*Tseg, 1, 0],
+    [0, 0, 0, 2, 0, 0],
+    [20*Tseg**3, 12*Tseg**2, 6*Tseg, 2, 0, 0]
+], dtype=float)
 
-# Coefficient matrices per segment (4 joints × 6 coeffs)
-A_mat = np.zeros((4, 6)); B_mat = np.zeros((4, 6))
-C_mat = np.zeros((4, 6)); D_mat = np.zeros((4, 6))
-seg_mats = {'A':A_mat, 'B':B_mat, 'C':C_mat, 'D':D_mat}
+def solve_quintic(q0, q1, qd0, qd1):
+    b = np.array([q0, q1, qd0, qd1, 0.0, 0.0])
+    return np.linalg.solve(A, b)
 
-for name, i0, i1 in segments:
-    M = seg_mats[name]
-    for j in range(4):  # joint index
-        a = quintic_coeffs(q_knots[i0, j], q_knots[i1, j],
-                           qdot_knots[i0, j], qdot_knots[i1, j],
-                           qddot_knots[i0, j], qddot_knots[i1, j],
-                           T=Tseg)
-        M[j, :] = a  # a5..a0
+coeffs = []
+for s in range(len(times) - 1):
+    seg = [solve_quintic(Q[s, j], Q[s+1, j], Qdot[s, j], Qdot[s+1, j]) for j in range(4)]
+    coeffs.append(seg)
 
-# Pretty print coefficients
-def print_coeffs(title, M):
-    print(f"\n{title} coefficients (rows q1..q4; columns a5 a4 a3 a2 a1 a0):")
-    with np.printoptions(precision=6, suppress=True):
-        print(M)
+# ------------------------------------------------------------
+# Print quintic polynomial coefficients per joint and per segment
+# Segments: 0-2, 2-4, 4-6, 6-8 (seconds)
+# Each coeff array is [a5, a4, a3, a2, a1, a0] for q(t) = a5*t^5 + ... + a0
+# ------------------------------------------------------------
+# Print only coefficient matrices: one 4x6 matrix per segment (rows = joints 1..4,
+# columns = [a5, a4, a3, a2, a1, a0]). No extra text.
+np.set_printoptions(precision=3, suppress=False)
+for s, seg in enumerate(coeffs):
+    t0 = times[s]
+    t1 = times[s+1]
+    print(f"Segment coefficients for t = {t0} to {t1} s:")
+    print("Row = joint (1..4), Columns = [a5, a4, a3, a2, a1, a0]")
+    mat = np.array(seg)  # shape (4,6)
+    print(mat)
+    print()
 
-print_coeffs("Segment A (q^(0)→q^(9))", A_mat)
-print_coeffs("Segment B (q^(9)→q^(18))", B_mat)
-print_coeffs("Segment C (q^(18)→q^(27))", C_mat)
-print_coeffs("Segment D (q^(27)→q^(36))", D_mat)
+# ------------------------------------------------------------
+# Evaluate q(t), qdot(t), qddot(t) over 0..8 s
+# ------------------------------------------------------------
+def eval_quintic(a, t):
+    a5, a4, a3, a2, a1, a0 = a
+    q = a5*t**5 + a4*t**4 + a3*t**3 + a2*t**2 + a1*t + a0
+    qd = 5*a5*t**4 + 4*a4*t**3 + 3*a3*t**2 + 2*a2*t + a1
+    qdd = 20*a5*t**3 + 12*a4*t**2 + 6*a3*t + 2*a2
+    return q, qd, qdd
 
-# ---------------------------
-# Evaluate & plot trajectory
-# ---------------------------
-def eval_poly_row(a, t):
-    """Given coeffs a=[a5..a0], return q, dq, ddq at time array t."""
-    t = np.asarray(t)
-    q  = (((a[0]*t + a[1])*t + a[2])*t + a[3])*t**2 + a[4]*t + a[5]  # robust Horner-ish
-    dq = (5*a[0]*t**4 + 4*a[1]*t**3 + 3*a[2]*t**2 + 2*a[3]*t + a[4])
-    ddq = (20*a[0]*t**3 + 12*a[1]*t**2 + 6*a[2]*t + 2*a[3])
-    return q, dq, ddq
+t_fine = np.linspace(0, 8, 400)
+q_vals = np.zeros((len(t_fine), 4))
+qd_vals = np.zeros((len(t_fine), 4))
+qdd_vals = np.zeros((len(t_fine), 4))
 
-def concat_segments(mats, T=2.0, dt=0.01):
-    """Concatenate A,B,C,D into full 0–8s arrays for q,dq,ddq per joint."""
-    times = []
-    q_all = []; dq_all = []; ddq_all = []
-    t0 = 0.0
-    for M in mats:
-        t = np.arange(0.0, T+1e-12, dt)
-        times.append(t + t0)
-        q_seg = []; dq_seg = []; ddq_seg = []
-        for j in range(4):
-            q, dq, ddq = eval_poly_row(M[j], t)
-            q_seg.append(q); dq_seg.append(dq); ddq_seg.append(ddq)
-        q_all.append(np.stack(q_seg, axis=0))
-        dq_all.append(np.stack(dq_seg, axis=0))
-        ddq_all.append(np.stack(ddq_seg, axis=0))
-        t0 += T
-    t_full = np.concatenate(times)
-    q_full = np.concatenate(q_all, axis=1)
-    dq_full = np.concatenate(dq_all, axis=1)
-    ddq_full = np.concatenate(ddq_all, axis=1)
-    return t_full, q_full, dq_full, ddq_full
+for k, t in enumerate(t_fine):
+    seg_idx = min(int(t // 2), 3)
+    t_local = t - 2*seg_idx
+    for j in range(4):
+        q, qd, qdd = eval_quintic(coeffs[seg_idx][j], t_local)
+        q_vals[k, j], qd_vals[k, j], qdd_vals[k, j] = q, qd, qdd
 
-t, q_traj, dq_traj, ddq_traj = concat_segments([A_mat, B_mat, C_mat, D_mat], T=Tseg, dt=0.01)
+# ------------------------------------------------------------
+# Plot q, qdot, qddot
+# ------------------------------------------------------------
+plt.figure(figsize=(10, 10))
+joint_labels = [r"$q_1$", r"$q_2$", r"$q_3$", r"$q_4$"]
 
-# Plot
-labels = [r"$q_1$", r"$q_2$", r"$q_3$", r"$q_4$"]
-fig, axes = plt.subplots(3, 1, figsize=(9, 9), sharex=True)
+plt.subplot(3,1,1)
 for j in range(4):
-    axes[0].plot(t, q_traj[j], label=labels[j])
-    axes[1].plot(t, dq_traj[j], label=labels[j])
-    axes[2].plot(t, ddq_traj[j], label=labels[j])
+    plt.plot(t_fine, q_vals[:, j], label=joint_labels[j])
+for j in range(4):
+    plt.scatter(times, Q[:, j], color='k', s=10)
+plt.title("Joint positions $q_i(t)$")
+plt.ylabel("Angle [rad]")
+plt.grid(True); plt.legend()
 
-axes[0].set_ylabel("q [rad]")
-axes[1].set_ylabel("q̇ [rad/s]")
-axes[2].set_ylabel("q̈ [rad/s²]")
-axes[2].set_xlabel("time [s]")
+plt.subplot(3,1,2)
+for j in range(4):
+    plt.plot(t_fine, qd_vals[:, j], label=joint_labels[j])
+for j in range(4):
+    plt.scatter(times, Qdot[:, j], color='k', s=10)
+plt.title(r"Joint velocities $\dot{q}_i(t)$")
+plt.ylabel("Velocity [rad/s]")
+plt.grid(True); plt.legend()
 
-for ax in axes:
-    ax.grid(True, alpha=0.3)
-axes[0].legend(ncol=4, fontsize=9, loc="upper right")
-fig.suptitle("Problem 6 — Quintic joint trajectories over 4 segments (T=2 s each)")
+plt.subplot(3,1,3)
+for j in range(4):
+    plt.plot(t_fine, qdd_vals[:, j], label=joint_labels[j])
+plt.title(r"Joint accelerations $\ddot{q}_i(t)$")
+plt.xlabel("Time [s]")
+plt.ylabel("Acceleration [rad/s²]")
+plt.grid(True); plt.legend()
+
+plt.suptitle("Quintic interpolation for joint motion (with velocity & acceleration continuity)")
 plt.tight_layout()
 plt.show()
