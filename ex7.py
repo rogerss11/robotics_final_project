@@ -1,11 +1,10 @@
-# ex7.py — Plot actual vs desired end-effector path for interpolated trajectory (Problem 7)
 import numpy as np
 import sympy as sp
 import matplotlib.pyplot as plt
 
-# ============================================================
-#  DH, IK, and FK (copied from ex6 for independence)
-# ============================================================
+# ------------------------------------------------------------
+# DH, FK, Jacobian, IK (same definitions as ex5)
+# ------------------------------------------------------------
 def DH(a, alpha, d, theta):
     return sp.Matrix([
         [sp.cos(theta), -sp.sin(theta)*sp.cos(alpha),  sp.sin(theta)*sp.sin(alpha), a*sp.cos(theta)],
@@ -16,10 +15,10 @@ def DH(a, alpha, d, theta):
 
 q1, q2, q3, q4 = sp.symbols("q1 q2 q3 q4")
 dh_params = [
-    (0,  sp.pi/2, 50, q1),
-    (93, 0,       0,  q2),
-    (93, 0,       0,  q3),
-    (50, sp.pi/2, 0,  q4)
+    (0, sp.pi/2, 50, q1),
+    (93, 0, 0, q2),
+    (93, 0, 0, q3),
+    (50, sp.pi/2, 0, q4)
 ]
 
 def forward_transforms():
@@ -28,12 +27,23 @@ def forward_transforms():
     for p in dh_params:
         T = T * DH(*p)
         Ts.append(sp.simplify(T))
-    return Ts  # T0..T4
+    return Ts
 
-Ts_sym = forward_transforms()
-T04_sym = Ts_sym[4]
+Ts = forward_transforms()
 
-# Inverse kinematics (same as before)
+def geometric_jacobian(Ts, end_index):
+    o_n = Ts[end_index][0:3, 3]
+    Jv_cols, Jw_cols = [], []
+    for i in range(1, 5):
+        z_im1 = Ts[i-1][0:3, 2]
+        o_im1 = Ts[i-1][0:3, 3]
+        Jv_cols.append(sp.Matrix.cross(z_im1, o_n - o_im1))
+        Jw_cols.append(z_im1)
+    return sp.simplify(sp.Matrix.vstack(sp.Matrix.hstack(*Jv_cols),
+                                        sp.Matrix.hstack(*Jw_cols)))
+
+J4_sym = geometric_jacobian(Ts, 4)
+
 a1, a2, a3, d1 = 0, 93, 93, 50
 def ik_solver(x, y, z, c):
     q1v = np.arctan2(y, x)
@@ -47,125 +57,304 @@ def ik_solver(x, y, z, c):
     q4v = np.arcsin(c) - (q2v + q3v)
     return np.array([q1v, q2v, q3v, q4v])
 
-# ============================================================
-#  Load same trajectory parameters from ex6 (hardcode or recompute)
-# ============================================================
-# Circle definition (desired path)
+def J4_numeric(qv):
+    subs = {q1: qv[0], q2: qv[1], q3: qv[2], q4: qv[3]}
+    return np.array(J4_sym.evalf(subs=subs), dtype=float)
+
+# ------------------------------------------------------------
+# EE circle and knot points (same as ex3)
+# ------------------------------------------------------------
 R = 32.0
 p_c = np.array([150.0, 0.0, 120.0])
-
-# Knot configuration generation (same as ex6)
 phis = np.linspace(0, 2*np.pi, 37)
+points = []
+for phi in phis:
+    p = p_c + R * np.array([0.0, np.cos(phi), np.sin(phi)])
+    x, y, z = p
+    c = 0.0
+    points.append([x, y, z, c])
+points = np.array(points)
+
 idxs = [0, 9, 18, 27, 36]
-def circle_point(phi):
-    return p_c + R*np.array([0.0, np.cos(phi), np.sin(phi)])
+times = np.array([0, 2, 4, 6, 8])
 
 # ------------------------------------------------------------
-# Quintic interpolation (reuse from ex6)
+# Joint positions at knots
 # ------------------------------------------------------------
-def quintic_coeffs(q0, q1, dq0, dq1, ddq0, ddq1, T=2.0):
-    T2, T3, T4, T5 = T**2, T**3, T**4, T**5
-    M = np.array([
-        [0, 0, 0, 0, 0, 1],
-        [0, 0, 0, 0, 1, 0],
-        [0, 0, 0, 2, 0, 0],
-        [T5, T4, T3, T2, T, 1],
-        [5*T4, 4*T3, 3*T2, 2*T, 1, 0],
-        [20*T3, 12*T2, 6*T, 2, 0, 0]
-    ])
-    b = np.array([q0, dq0, ddq0, q1, dq1, ddq1])
-    return np.linalg.solve(M, b)
+Q = np.array([ik_solver(*points[i]) for i in idxs])
 
-# Simplify by loading stored data from ex6 or recomputing approximate joint angles.
-# We'll recompute knot q values using IK (zero velocities, zero acc)
-q_knots = []
-for idx in idxs:
-    phi = phis[idx]
-    x, y, z = circle_point(phi)
-    qv = ik_solver(x, y, z, 0.0)
-    q_knots.append(qv)
-q_knots = np.array(q_knots)
-qdot_knots = np.zeros_like(q_knots)
-qddot_knots = np.zeros_like(q_knots)
+# ------------------------------------------------------------
+# EE velocities and corresponding joint velocities
+# ------------------------------------------------------------
+V_knots = [
+    np.array([0.0,   0.0,  0.0]),
+    np.array([0.0, -27.0,  0.0]),
+    np.array([0.0,   0.0, -27.0]),
+    np.array([0.0,  27.0,  0.0]),
+    np.array([0.0,   0.0,  0.0])
+]
+OMEGA = np.zeros(3)
+Qdot = np.zeros_like(Q)
+for k in range(len(times)):
+    J = J4_numeric(Q[k])
+    xdot = np.hstack([V_knots[k], OMEGA]).reshape(6, 1)
+    qdot = np.linalg.pinv(J) @ xdot
+    Qdot[k] = qdot.flatten()
 
-# Segments and coefficient matrices
-segments = [('A', 0, 1), ('B', 1, 2), ('C', 2, 3), ('D', 3, 4)]
-Tseg = 2.0
-seg_mats = []
-for name, i0, i1 in segments:
-    M = np.zeros((4, 6))
+Qddot = np.zeros_like(Q)  # zero acceleration at all knots
+
+# ------------------------------------------------------------
+# Solve quintic coefficients per segment and joint
+# ------------------------------------------------------------
+T = 2.0
+A = np.array([
+    [0, 0, 0, 0, 0, 1],
+    [T**5, T**4, T**3, T**2, T, 1],
+    [0, 0, 0, 0, 1, 0],
+    [5*T**4, 4*T**3, 3*T**2, 2*T, 1, 0],
+    [0, 0, 0, 2, 0, 0],
+    [20*T**3, 12*T**2, 6*T, 2, 0, 0]
+], dtype=float)
+
+def solve_quintic(q0, q1, qd0, qd1):
+    b = np.array([q0, q1, qd0, qd1, 0.0, 0.0])
+    return np.linalg.solve(A, b)
+
+coeffs = []
+for s in range(len(times) - 1):
+    seg = [solve_quintic(Q[s, j], Q[s+1, j], Qdot[s, j], Qdot[s+1, j]) for j in range(4)]
+    coeffs.append(seg)
+
+# ------------------------------------------------------------
+# Evaluate q, qdot, qddot over time
+# ------------------------------------------------------------
+def eval_quintic(a, t):
+    a5, a4, a3, a2, a1, a0 = a
+    q = a5*t**5 + a4*t**4 + a3*t**3 + a2*t**2 + a1*t + a0
+    qd = 5*a5*t**4 + 4*a4*t**3 + 3*a3*t**2 + 2*a2*t + a1
+    qdd = 20*a5*t**3 + 12*a4*t**2 + 6*a3*t + 2*a2
+    return q, qd, qdd
+
+t_fine = np.linspace(0, 8, 400)
+q_vals, qd_vals, qdd_vals = np.zeros((len(t_fine), 4)), np.zeros((len(t_fine), 4)), np.zeros((len(t_fine), 4))
+
+for k, t in enumerate(t_fine):
+    seg_idx = min(int(t // 2), 3)
+    t_local = t - 2*seg_idx
     for j in range(4):
-        a = quintic_coeffs(q_knots[i0, j], q_knots[i1, j],
-                           qdot_knots[i0, j], qdot_knots[i1, j],
-                           qddot_knots[i0, j], qddot_knots[i1, j], Tseg)
-        M[j, :] = a
-    seg_mats.append(M)
+        q, qd, qdd = eval_quintic(coeffs[seg_idx][j], t_local)
+        q_vals[k, j], qd_vals[k, j], qdd_vals[k, j] = q, qd, qdd
 
-# Evaluate polynomial
-def eval_poly_row(a, t):
-    t = np.asarray(t)
-    q  = a[0]*t**5 + a[1]*t**4 + a[2]*t**3 + a[3]*t**2 + a[4]*t + a[5]
-    return q
+# ------------------------------------------------------------
+# Plot results: q, qdot, qddot
+# ------------------------------------------------------------
+plt.figure(figsize=(10, 10))
+joint_labels = [r"$q_1$", r"$q_2$", r"$q_3$", r"$q_4$"]
 
-def concat_segments(mats, T=2.0, dt=0.02):
-    times = []
-    q_all = []
-    t0 = 0.0
-    for M in mats:
-        t = np.arange(0.0, T+1e-9, dt)
-        times.append(t + t0)
-        q_seg = []
-        for j in range(4):
-            q = eval_poly_row(M[j], t)
-            q_seg.append(q)
-        q_all.append(np.stack(q_seg, axis=0))
-        t0 += T
-    t_full = np.concatenate(times)
-    q_full = np.concatenate(q_all, axis=1)
-    return t_full, q_full
+# q(t)
+plt.subplot(3,1,1)
+for j in range(4):
+    plt.plot(t_fine, q_vals[:, j], label=joint_labels[j])
+for j in range(4):
+    plt.scatter(times, Q[:, j], color='k', s=10)
+plt.title("Joint positions $q_i(t)$")
+plt.ylabel("Angle [rad]")
+plt.grid(True); plt.legend()
 
-t_full, q_traj = concat_segments(seg_mats, T=Tseg, dt=0.02)
+# qdot(t)
+plt.subplot(3,1,2)
+for j in range(4):
+    plt.plot(t_fine, qd_vals[:, j], label=joint_labels[j])
+for j in range(4):
+    plt.scatter(times, Qdot[:, j], color='k', s=10)
+plt.title(r"Joint velocities $\dot{q}_i(t)$")
+plt.ylabel("Velocity [rad/s]")
+plt.grid(True); plt.legend()
 
-# ============================================================
-#  Compute actual end-effector path
-# ============================================================
-def fk_numeric(q_vals):
+# qddot(t)
+plt.subplot(3,1,3)
+for j in range(4):
+    plt.plot(t_fine, qdd_vals[:, j], label=joint_labels[j])
+plt.title(r"Joint accelerations $\ddot{q}_i(t)$")
+plt.xlabel("Time [s]")
+plt.ylabel("Acceleration [rad/s²]")
+plt.grid(True); plt.legend()
+
+plt.suptitle("Quintic interpolation for joint motion (with velocity & acceleration continuity)")
+plt.tight_layout()
+plt.show()
+
+# ------------------------------------------------------------
+#  Compare actual EE path vs. desired circular path
+# ------------------------------------------------------------
+from mpl_toolkits.mplot3d import Axes3D  # for 3D plotting
+
+# --- Reuse FK computation like in ex3 ---
+def compute_positions(q_vals):
+    """Compute all frame origins given joint angles (same as ex3)."""
     subs = {q1: q_vals[0], q2: q_vals[1], q3: q_vals[2], q4: q_vals[3]}
-    T_num = np.array(T04_sym.evalf(subs=subs), dtype=float)
-    return T_num[:3, 3]
+    Tcurr = sp.eye(4)
+    origins = [np.array([0, 0, 0])]
+    for p in dh_params:
+        Tcurr = Tcurr * DH(*p)
+        Tn = np.array(Tcurr.evalf(subs=subs), dtype=float)
+        origins.append(Tn[0:3, 3])
+    return origins
 
-p_actual = np.zeros((len(t_full), 3))
-for k in range(len(t_full)):
-    qv = q_traj[:, k]
-    p_actual[k, :] = fk_numeric(qv)
+# --- Compute desired EE path (perfect circle) ---
+desired_positions = []
+for phi in phis:
+    p = p_c + R * np.array([0.0, np.cos(phi), np.sin(phi)])
+    desired_positions.append(p)
+desired_positions = np.array(desired_positions)
 
-# Desired exact circular path (Problem 3)
-phi_exact = np.linspace(0, 2*np.pi, 400)
-circle_exact = np.array([circle_point(phi) for phi in phi_exact])
+# --- Compute actual EE path from interpolated q(t) ---
+actual_positions = []
+for q in q_vals:
+    origins = compute_positions(q)
+    ee = origins[-1]
+    actual_positions.append(ee)
+actual_positions = np.array(actual_positions)
 
-# ============================================================
-#  Plot comparison
-# ============================================================
+# --- Plot both paths ---
 fig = plt.figure(figsize=(8, 6))
-ax = fig.add_subplot(111, projection="3d")
+ax = fig.add_subplot(111, projection='3d')
 
-# Plot desired circular path
-ax.plot(circle_exact[:, 0], circle_exact[:, 1], circle_exact[:, 2],
-        'k--', lw=1.5, label="Desired circular path")
+# Plot desired circular path (orange)
+ax.plot(desired_positions[:,0], desired_positions[:,1], desired_positions[:,2],
+        'orange', label='Desired EE path (circular)', linewidth=2)
 
-# Plot actual end-effector path
-ax.plot(p_actual[:, 0], p_actual[:, 1], p_actual[:, 2],
-        'r', lw=2, label="Actual end-effector trajectory")
+# Plot actual EE path (blue)
+ax.plot(actual_positions[:,0], actual_positions[:,1], actual_positions[:,2],
+        'b--', label='Interpolated EE path (Problem 6)', linewidth=2)
 
-# Style
+# Highlight start and end points
+ax.scatter(desired_positions[0,0], desired_positions[0,1], desired_positions[0,2],
+           c='green', s=50, label='Start (t=0)')
+ax.scatter(desired_positions[-1,0], desired_positions[-1,1], desired_positions[-1,2],
+           c='red', s=50, label='End (t=8 s)')
+
+# Axis labels and view
 ax.set_xlabel("X [mm]")
 ax.set_ylabel("Y [mm]")
 ax.set_zlabel("Z [mm]")
-ax.set_xlim([100, 200])
-ax.set_ylim([-50, 50])
-ax.set_zlim([80, 160])
-ax.set_title("Problem 7 — End-effector trajectory vs desired circular path")
+ax.set_title("Comparison of End-Effector Path\nDesired (Circle) vs. Interpolated (Quintic)")
 ax.legend()
 ax.view_init(elev=25, azim=45)
+ax.set_box_aspect([1, 1, 1])
 plt.tight_layout()
+plt.show()
+
+import time
+
+# ------------------------------------------------------------
+#  Visualization setup (copied from ex3 and adapted)
+# ------------------------------------------------------------
+fig = plt.figure(figsize=(8, 6))
+ax = fig.add_subplot(111, projection="3d")
+plt.subplots_adjust(bottom=0.28)
+
+# Base frame
+world_len = 30
+ax.quiver(0, 0, 0, 1, 0, 0, color="r", length=world_len, normalize=True)
+ax.quiver(0, 0, 0, 0, 1, 0, color="g", length=world_len, normalize=True)
+ax.quiver(0, 0, 0, 0, 0, 1, color="b", length=world_len, normalize=True)
+ax.text(35, 0, 0, "X₀", color="r")
+ax.text(0, 35, 0, "Y₀", color="g")
+ax.text(0, 0, 35, "Z₀", color="b")
+
+# Display all 37 target EE positions (orange dots)
+tip_positions = []
+for p in points:
+    x_t, y_t, z_t, c_t = p
+    q_tmp = ik_solver(x_t, y_t, z_t, c_t)
+    origins_tmp = compute_positions(q_tmp)
+    tip_positions.append(origins_tmp[-1])
+tip_positions = np.array(tip_positions)
+ax.scatter(tip_positions[:,0], tip_positions[:,1], tip_positions[:,2], 
+           c="orange", s=20, label="Target circle (desired)")
+
+# Initial pose for animation
+q_init = q_vals[0]
+origins = compute_positions(q_init)
+
+# Draw links and frames
+link_lines = []
+for i in range(len(origins) - 1):
+    p1, p2 = origins[i], origins[i + 1]
+    (line,) = ax.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]], 
+                      "k--", linewidth=1.2)
+    link_lines.append(line)
+
+frame_quivers = []
+for i in range(1, len(origins)):
+    o = origins[i]
+    qx = ax.quiver(o[0], o[1], o[2], 1, 0, 0, color="r", length=20, normalize=True)
+    qy = ax.quiver(o[0], o[1], o[2], 0, 1, 0, color="g", length=20, normalize=True)
+    qz = ax.quiver(o[0], o[1], o[2], 0, 0, 1, color="b", length=20, normalize=True)
+    frame_quivers.append((qx, qy, qz))
+
+# Display joint values
+joint_display = ax.text2D(0.98, 0.95, "", transform=ax.transAxes, fontsize=10,
+                          verticalalignment='top', horizontalalignment='right',
+                          bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
+
+# Axis and view
+ax.set_xlim([0, 250])
+ax.set_ylim([-150, 150])
+ax.set_zlim([0, 250])
+ax.set_xlabel("X (mm)")
+ax.set_ylabel("Y (mm)")
+ax.set_zlabel("Z (mm)")
+ax.set_title("Ex6: Robot following interpolated (quintic) EE path")
+ax.legend()
+ax.view_init(elev=25, azim=45)
+ax.set_box_aspect([1, 1, 1])
+
+# ------------------------------------------------------------
+#  Animate along the computed path
+# ------------------------------------------------------------
+actual_path = []  # for plotting EE trace
+n_frames = len(q_vals)
+
+for k in range(n_frames):
+    q_now = q_vals[k]
+    origins = compute_positions(q_now)
+    actual_path.append(origins[-1])
+    
+    # Update links
+    for i, line in enumerate(link_lines):
+        p1, p2 = origins[i], origins[i + 1]
+        line.set_data([p1[0], p2[0]], [p1[1], p2[1]])
+        line.set_3d_properties([p1[2], p2[2]])
+    
+    # Update frames
+    for (qx, qy, qz) in frame_quivers:
+        qx.remove(); qy.remove(); qz.remove()
+    frame_quivers.clear()
+    for i in range(1, len(origins)):
+        o = origins[i]
+        qx = ax.quiver(o[0], o[1], o[2], 1, 0, 0, color="r", length=20, normalize=True)
+        qy = ax.quiver(o[0], o[1], o[2], 0, 1, 0, color="g", length=20, normalize=True)
+        qz = ax.quiver(o[0], o[1], o[2], 0, 0, 1, color="b", length=20, normalize=True)
+        frame_quivers.append((qx, qy, qz))
+
+    # Update text with current joint values
+    joint_text = (f"q1 = {q_now[0]:.3f} rad\n"
+                  f"q2 = {q_now[1]:.3f} rad\n"
+                  f"q3 = {q_now[2]:.3f} rad\n"
+                  f"q4 = {q_now[3]:.3f} rad")
+    joint_display.set_text(joint_text)
+
+    # Draw current EE trace
+    actual_arr = np.array(actual_path)
+    if k == 0:
+        path_line, = ax.plot(actual_arr[:,0], actual_arr[:,1], actual_arr[:,2],
+                             "b-", linewidth=2, label="Interpolated EE path")
+    else:
+        path_line.set_data(actual_arr[:,0], actual_arr[:,1])
+        path_line.set_3d_properties(actual_arr[:,2])
+
+    plt.pause(0.03)  # ~30 ms per frame → smooth animation
+
 plt.show()
