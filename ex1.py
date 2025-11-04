@@ -24,7 +24,7 @@ dh_params = [
     (0, sp.pi / 2, 50, q1),
     (93, 0, 0, q2),
     (93, 0, 0, q3),
-    (50, sp.pi / 2, 0, q4)
+    (50, 0, 0, q4)
 ]
 
 # --- Compute T04 symbolically ---
