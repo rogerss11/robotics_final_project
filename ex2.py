@@ -38,6 +38,37 @@ q1, q2, q3, q4 = [p[3] for p in dh_params]
 # ------------------------------------------------------------
 a1, a2, a3, d1 = 0, 93, 93, 50  # link lengths and base height [mm]
 
+def ik_solver_tip(x, y, z, c):
+    """
+    Inverse kinematics when (x, y, z) is the stylus tip (O4),
+    not the wrist (O3).
+    """
+    a2, a3, d1, d4 = 93, 93, 50, 50  # mm
+    q1 = np.arctan2(y, x)
+
+    # orientation constraint
+    c = np.clip(c, -1.0, 1.0)
+    tilt = np.arcsin(c)  # total tilt angle = q2 + q3 + q4
+
+    # we don't yet know q2+q3, so estimate wrist center O3
+    # r = horizontal dist, s = vertical dist
+    r = np.sqrt(x**2 + y**2)
+    s = z - d1
+
+    # subtract wrist offset d4 in direction of stylus x-axis
+    rw = r - d4 * np.cos(tilt)
+    sw = s - d4 * np.sin(tilt)
+
+    # solve planar 2-link geometry
+    c3 = (rw**2 + sw**2 - a2**2 - a3**2) / (2*a2*a3)
+    c3 = np.clip(c3, -1.0, 1.0)
+    q3 = np.arctan2(np.sqrt(1 - c3**2), c3)   # elbow-down
+    q2 = np.arctan2(sw, rw) - np.arctan2(a3*np.sin(q3), a2 + a3*np.cos(q3))
+    q4 = tilt - (q2 + q3)
+
+    return np.array([q1, q2, q3, q4])
+
+
 def ik_solver(x, y, z, c):
     """
     Analytic inverse kinematics for the 4-DOF manipulator.
