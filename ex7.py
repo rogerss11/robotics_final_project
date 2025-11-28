@@ -5,12 +5,14 @@ import matplotlib.pyplot as plt
 from functions import (
     ik_solver,
     generate_circle_points,
-    compute_T0i
+    compute_T0i,
+    eval_quintic,
+    solve_quintic,
+    geometric_jacobian,
 )
 
-# ============================================================
-# Helper: Forward kinematics → end-effector position
-# ============================================================
+from simulation import set_axes_equal
+
 def fk_end_effector(q):
     """Return EE {4} position in world frame."""
     T04 = compute_T0i(q, 4)
@@ -29,21 +31,19 @@ A = np.array([
     [20*Tseg**3,12*Tseg**2,6*Tseg,2,0,0],
 ], float)
 
-def solve_quintic(q0, q1, qd0, qd1):
-    b = np.array([q0, q1, qd0, qd1, 0, 0])
-    return np.linalg.solve(A, b)
-
-def eval_quintic(a, t):
-    a5,a4,a3,a2,a1,a0 = a
-    q   = a5*t**5 + a4*t**4 + a3*t**3 + a2*t**2 + a1*t + a0
-    qd  = 5*a5*t**4 + 4*a4*t**3 + 3*a3*t**2 + 2*a2*t + a1
-    qdd = 20*a5*t**3 + 12*a4*t**2 + 6*a3*t + 2*a2
-    return q, qd, qdd
-
 # ============================================================
-# Choose number of knots (increase to improve accuracy!)
+# Choose number of knots
 # ============================================================
-N_knots = 9        # try 9, 13, 17 …
+N_knots = 5
+V_knots = [
+    np.array([ 0,   0,   0 ]),   # start: stop
+    np.array([ 0, -27,   0 ]),   # moving -y
+    np.array([ 0,   0, -27 ]),   # moving -z
+    np.array([ 0,  27,   0 ]),   # moving +y
+    np.array([ 0,   0,   0 ]),   # end: stop
+]
+OMEGA = np.zeros(3)  # no rotational velocity
+
 N_circle = 200     # resolution of the true desired path
 
 phi_vals = np.linspace(0, 2*np.pi, N_circle)
@@ -63,21 +63,26 @@ for k in idxs:
     Q.append(qv)
 
 Q = np.array(Q)
-
-# ============================================================
-# Approximate knot velocities using finite difference
-# (more knots → better accuracy)
-# ============================================================
 Qdot = np.zeros_like(Q)
-dt = times[1] - times[0]
 
-for i in range(len(Q)):
-    if i == 0:
-        Qdot[i] = (Q[i+1] - Q[i]) / dt
-    elif i == len(Q)-1:
-        Qdot[i] = (Q[i] - Q[i-1]) / dt
-    else:
-        Qdot[i] = (Q[i+1] - Q[i-1]) / (2*dt)
+# ============================================================
+# 3) Compute joint velocities Qdot from Jacobian (instead of finite difference)
+# ============================================================
+
+# Cartesian velocities of the tip at each knot (mm/s)
+# These define motion tangential to the circle:
+
+for k in range(len(times)):
+    # compute Jacobian at joint configuration Q[k]
+    J = geometric_jacobian(Q[k], 4)   # 6×4
+    
+    # desired Cartesian velocity of the TCP at this knot
+    xdot = np.hstack([V_knots[k], OMEGA])   # shape (6,)
+    
+    # compute qdot using pseudoinverse
+    qdot = np.linalg.pinv(J) @ xdot        # shape (4,)
+    Qdot[k] = qdot
+
 
 # ============================================================
 # Build ALL quintic segments between knots
@@ -132,4 +137,5 @@ ax.set_ylabel("Y [mm]")
 ax.set_zlabel("Z [mm]")
 ax.legend()
 ax.set_box_aspect([1,1,1])
+set_axes_equal(ax, equal=True)
 plt.show()

@@ -62,6 +62,8 @@ def ik_solver(x4, y4, z4, c):
     """
     Analytic IK for the 4-DOF arm.
     Solves for the position of FRAME {4}.
+    x4, y4, z4: target position of frame {4}
+    c: tilt angle constraint (x4z = sin(q2 + q3 + q4) = c)
     """
 
     # ---------------------------------------
@@ -77,8 +79,8 @@ def ik_solver(x4, y4, z4, c):
     s4 = z4 - d1
 
     # Reduce radius by a4
-    r3 = r4 - a4
-    s3 = s4
+    r3 = r4 - a4*np.cos(c)
+    s3 = s4 - a4*np.sin(c)
 
     # ---------------------------------------
     # 2. Law of cosines for q3
@@ -144,38 +146,126 @@ def compute_joint_positions_circle(phi_vals, N=37):
 
 def geometric_jacobian(q_vals, i):
     """
-    Compute the geometric Jacobian for frame {i}.
-
-    q_vals: [q1, q2, q3, q4] in radians
-    i: index of the desired frame (1 to 5)
+    Compute the 6×4 geometric Jacobian for frame {i} (i = 1..5).
+    q_vals = [q1, q2, q3, q4]
     """
-    # Compute T0i for each frame
-    Ts = [np.eye(4)]
-    for idx in range(1, 5):
-        Ts.append(compute_T0i(q_vals, idx-1))
-    # If frame {5} (camera), apply fixed transform from frame 4 to 5
+
+    # ------------------------------------------------------------
+    # Build T0k for k = 0..4 using compute_T0i(q_vals, k)
+    # ------------------------------------------------------------
+    Ts = [np.eye(4)]                      # T00
+    for k in range(1, 5):                 # T01..T04
+        Ts.append(compute_T0i(q_vals, k))
+
+    # ------------------------------------------------------------
+    # Frame 5 → camera frame: T05 = T04 · T45
+    # ------------------------------------------------------------
     if i == 5:
-        Ts.append(Ts[4] @ T_45())
+        T05 = Ts[4] @ T_45()
+        Ts.append(T05)
+    else:
+        Ts.append(None)
+
+    # Origin of the target frame i
+    o_n = Ts[i][0:3, 3]
 
     Jv_cols = []
     Jw_cols = []
-    o_n = Ts[i][0:3, 3].flatten()    # Ensure shape (3,)
 
-    # Loop through each joint up to frame {i}
-    for j in range(i):
-        z_im1 = Ts[j][0:3, 2].flatten()   # Ensure shape (3,)
-        o_im1 = Ts[j][0:3, 3].flatten()   # Ensure shape (3,)
+    # ------------------------------------------------------------
+    # Loop through robot joints j = 1..4
+    # ------------------------------------------------------------
+    for j in range(1, 5):
 
-        # Linear part: z_(i-1) × (o_n - o_(i-1))
-        Jv_cols.append(np.cross(z_im1, o_n - o_im1))
-        # Angular part: z_(i-1)
-        Jw_cols.append(z_im1 if z_im1.shape == (3,) else np.asarray(z_im1).flatten())
+        # If joint j is AFTER frame i → it cannot affect this frame
+        if j > i:
+            Jv_cols.append(np.zeros(3))
+            Jw_cols.append(np.zeros(3))
+            continue
 
-    # Stack columns to form Jacobian submatrices
-    Jv = np.column_stack([np.asarray(col).flatten() for col in Jv_cols])
-    Jw = np.column_stack([np.asarray(col).flatten() for col in Jw_cols])
-    # Combine linear and angular parts into full Jacobian
-    J = np.vstack((Jv, Jw))
+        # Else joint j affects this frame → compute Jacobian normally
+        Tjm1 = Ts[j-1]
+        z = Tjm1[0:3, 2]
+        o = Tjm1[0:3, 3]
+
+        z = np.asarray(z).reshape(3,)
+        o = np.asarray(o).reshape(3,)
+        o_n = np.asarray(o_n).reshape(3,)
+
+        # Linear part
+        Jv_cols.append(np.cross(z, (o_n - o)))
+
+        # Angular part
+        Jw_cols.append(z)
+
+    # Combine into 6×4 Jacobian
+    Jv = np.column_stack(Jv_cols)
+    Jw = np.column_stack(Jw_cols)
+    J  = np.vstack((Jv, Jw))
+
+    return J
+
+def jacobian_at_point(q_vals, p_local, frame_index):
+    """
+    Compute the 6×4 geometric Jacobian for ANY point rigidly attached 
+    to ANY frame of the robot.
+    """
+
+    # ------------------------------------------------------------
+    # Build transforms T0k for k = 0..4
+    # ------------------------------------------------------------
+    Ts = [np.eye(4)]                      # T00
+    for k in range(1, 5):                 # T01..T04
+        Ts.append(compute_T0i(q_vals, k))
+
+    # Append camera frame if needed
+    if frame_index == 5:
+        T05 = Ts[4] @ T_45()
+        Ts.append(T05)
+    else:
+        Ts.append(None)
+
+    # ------------------------------------------------------------
+    # Compute world position of the point o_p
+    # ------------------------------------------------------------
+    T0f = Ts[frame_index]
+    p_h = np.hstack((p_local, 1))
+
+    # FIX: flatten output of matrix multiplication
+    o_p_full = np.asarray(T0f @ p_h).reshape(4,)
+    o_p = o_p_full[0:3]      # final 3D point
+
+    Jv_cols = []
+    Jw_cols = []
+
+    # ------------------------------------------------------------
+    # Loop through joints j = 1..4
+    # ------------------------------------------------------------
+    for j in range(1, 5):
+
+        # joint j cannot affect frame above it
+        if j > frame_index:
+            Jv_cols.append(np.zeros(3))
+            Jw_cols.append(np.zeros(3))
+            continue
+
+        Tjm1 = Ts[j-1]
+
+        # Convert to proper 1D vectors
+        z = np.asarray(Tjm1[0:3, 2]).reshape(3,)
+        o = np.asarray(Tjm1[0:3, 3]).reshape(3,)
+
+        # Linear Jacobian component
+        Jv_cols.append(np.cross(z, o_p - o))
+
+        # Angular component
+        Jw_cols.append(z)
+
+    # Stack into final 6x4 Jacobian
+    Jv = np.column_stack(Jv_cols)
+    Jw = np.column_stack(Jw_cols)
+    J  = np.vstack((Jv, Jw))
+
     return J
 
 # ======= Exercise 5: Joint velocities =======
@@ -194,6 +284,27 @@ def joint_velocities(q_vals, v_e):
     return q_dot
 
 # ======= Exercise 6: Trajectory planning =======
+
+Tseg = 2.0
+A = np.array([
+    [0,0,0,0,0,1],
+    [Tseg**5,Tseg**4,Tseg**3,Tseg**2,Tseg,1],
+    [0,0,0,0,1,0],
+    [5*Tseg**4,4*Tseg**3,3*Tseg**2,2*Tseg,1,0],
+    [0,0,0,2,0,0],
+    [20*Tseg**3,12*Tseg**2,6*Tseg,2,0,0],
+], float)
+
+def solve_quintic(q0, q1, qd0, qd1):
+    b = np.array([q0, q1, qd0, qd1, 0, 0])
+    return np.linalg.solve(A, b)
+
+def eval_quintic(a, t):
+    a5,a4,a3,a2,a1,a0 = a
+    q   = a5*t**5 + a4*t**4 + a3*t**3 + a2*t**2 + a1*t + a0
+    qd  = 5*a5*t**4 + 4*a4*t**3 + 3*a3*t**2 + 2*a2*t + a1
+    qdd = 20*a5*t**3 + 12*a4*t**2 + 6*a3*t + 2*a2
+    return q, qd, qdd
 
 # ======= Exercise 7: EE path =======
 
@@ -232,3 +343,98 @@ def joint_torques_circle(phi_vals, F_e, N=37):
     return np.array(Taus)
 
 # ===== Exercise 10: Inertia and Dynamics Simulation =======
+
+def Ixx(m, dz, dy):
+    """
+    Inertia tensor of a cuboid about one of its principal axes.
+    m: mass
+    a, b: dimensions along y and z axes
+    returns Ixx
+    """
+    return (1/12) * m * (dy**2 + dz**2)
+
+def compute_D(q, masses, I_local, r_ci_list):
+    """
+    Compute the 4×4 inertia matrix D(q) of the robot at joint configuration q.
+    """
+    D = np.zeros((4,4))
+
+    for i in range(4):
+        # Transform from base to link i+1
+        T = compute_T0i(q, i+1)
+        R = T[:3,:3]
+
+        # inertia in base frame
+        I0 = R @ I_local[i] @ R.T
+        
+        # Jacobian for COM of link
+        J = jacobian_at_point(q, r_ci_list[i], frame_index=i+1)
+        Jv = J[0:3,:]
+        Jw = J[3:6,:]
+
+        D += masses[i] * (Jv.T @ Jv) + Jw.T @ I0 @ Jw
+
+    return D
+
+def compute_g(q, masses, r_ci_list, g_vec):
+    """
+    Compute the gravity vector g(q) of the robot at joint configuration q.
+    """
+    g = np.zeros(4)
+
+    for i in range(4):
+        J = jacobian_at_point(q, r_ci_list[i], frame_index=i+1)
+        Jv = J[0:3,:]
+        g += masses[i] * (Jv.T @ g_vec)
+
+    return g
+
+def compute_C(q, qdot, masses, I_local, r_ci_list):
+    """
+    Compute the Coriolis and centrifugal matrix C(q, qdot) of the robot at joint configuration q and velocity qdot.
+    """
+    Dq = compute_D(q, masses, I_local, r_ci_list)
+    C = np.zeros((4,4))
+
+    eps = 1e-6
+    dD_dq = np.zeros((4,4,4))
+
+    # Numerical partial derivatives ∂D/∂qk
+    for k in range(4):
+        dq = np.zeros(4)
+        dq[k] = eps
+
+        D_plus  = compute_D(q + dq, masses, I_local, r_ci_list)
+        D_minus = compute_D(q - dq, masses, I_local, r_ci_list)
+
+        dD_dq[:,:,k] = (D_plus - D_minus) / (2*eps)
+    # Compute Christoffel symbols and C matrix
+    for i in range(4):
+        for j in range(4):
+            C[i,j] = 0.5 * sum(
+                (dD_dq[i,j,k] + dD_dq[i,k,j] - dD_dq[k,j,i]) * qdot[k]
+                for k in range(4)
+            )
+
+    return C
+
+def compute_tau(q, qdot, qddot, masses, I_local, r_ci_list, g_vec):
+    """
+    Compute the joint torques tau given joint positions q, velocities qdot, and accelerations qddot.
+    """
+    D = compute_D(q, masses, I_local, r_ci_list)
+    C = compute_C(q, qdot, masses, I_local, r_ci_list)
+    g = compute_g(q, masses, r_ci_list, g_vec)
+    return D @ qddot + C @ qdot + g
+
+def compute_torques_trajectory(q, qdot, qddot, masses, I_local, r_ci_list, g_vec):
+    """
+    Compute joint torques for a trajectory of joint positions, velocities, and accelerations.
+    """
+    N = q.shape[0]
+    tau_all = np.zeros((N,4))
+
+    for k in range(N):
+        tau_all[k,:] = compute_tau(q[k], qdot[k], qddot[k], masses, I_local, r_ci_list, g_vec)
+
+    return tau_all

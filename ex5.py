@@ -26,7 +26,7 @@ print(np.round(q, 3))
 # 3. Desired EE velocity (frame {4})
 # v = [vx, vy, vz, wx, wy, wz]
 # -----------------------------------------
-v04 = np.array([0, -3, 0,   0, 0, 0], dtype=float)
+v04 = np.array([0, -3, 0, 0, 0, 0], dtype=float)
 
 # -----------------------------------------
 # 4. Compute joint velocities q_dot
@@ -34,4 +34,4 @@ v04 = np.array([0, -3, 0,   0, 0, 0], dtype=float)
 q_dot = joint_velocities(q, v04)
 
 print("\nRequired joint velocities q_dot (5 s.f.):")
-print(np.round(q_dot, 5))
+print(np.round(q_dot,10))

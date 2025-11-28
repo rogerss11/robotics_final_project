@@ -6,6 +6,8 @@ from functions import (
     ik_solver,
     generate_circle_points,
     geometric_jacobian,
+    eval_quintic,
+    solve_quintic,
 )
 
 # ============================================================
@@ -67,10 +69,6 @@ A = np.array([
     [20*Tseg**3,12*Tseg**2,6*Tseg,2,0,0],
 ], float)
 
-def solve_quintic(q0, q1, qd0, qd1):
-    b = np.array([q0, q1, qd0, qd1, 0, 0])
-    return np.linalg.solve(A, b)
-
 coeffs = [
     [solve_quintic(Q[s,j], Q[s+1,j], Qdot[s,j], Qdot[s+1,j]) for j in range(4)]
     for s in range(4)
@@ -79,12 +77,6 @@ coeffs = [
 # ============================================================
 # 5) Evaluate over full 0–8 s
 # ============================================================
-def eval_quintic(a, t):
-    a5,a4,a3,a2,a1,a0 = a
-    q   = a5*t**5 + a4*t**4 + a3*t**3 + a2*t**2 + a1*t + a0
-    qd  = 5*a5*t**4 + 4*a4*t**3 + 3*a3*t**2 + 2*a2*t + a1
-    qdd = 20*a5*t**3 + 12*a4*t**2 + 6*a3*t + 2*a2
-    return q, qd, qdd
 
 t_fine = np.linspace(0, 8, 400)
 q_vals   = np.zeros((400,4))

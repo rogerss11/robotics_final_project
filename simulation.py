@@ -121,6 +121,34 @@ def slider_block(labels, ranges, initial):
         sliders.append(Slider(ax_sl, lab, rng[0], rng[1], valinit=init))
     return sliders
 
+def set_axes_equal(ax, equal=True):
+    """
+    Set 3D plot axes to equal scale if equal=True.
+    If equal=False, do nothing (default Matplotlib behavior).
+    """
+    if not equal:
+        return  # leave axes as-is
+
+    # Extract current limits
+    x_limits = ax.get_xlim3d()
+    y_limits = ax.get_ylim3d()
+    z_limits = ax.get_zlim3d()
+
+    x_range = x_limits[1] - x_limits[0]
+    y_range = y_limits[1] - y_limits[0]
+    z_range = z_limits[1] - z_limits[0]
+
+    max_range = max(x_range, y_range, z_range)
+
+    x_mid = (x_limits[0] + x_limits[1]) / 2
+    y_mid = (y_limits[0] + y_limits[1]) / 2
+    z_mid = (z_limits[0] + z_limits[1]) / 2
+
+    # Apply equal scaling
+    ax.set_xlim3d([x_mid - max_range/2, x_mid + max_range/2])
+    ax.set_ylim3d([y_mid - max_range/2, y_mid + max_range/2])
+    ax.set_zlim3d([z_mid - max_range/2, z_mid + max_range/2])
+
 
 # ===========================================================
 # ---- EXERCISE 1 — JOINT SLIDERS (FK)
